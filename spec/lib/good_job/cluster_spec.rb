@@ -137,7 +137,7 @@ RSpec.describe GoodJob::Cluster do
 
       # Send SIGCHLD-triggering kill to one grandchild worker
       # We use pkill to target workers by their process name
-      system("pkill", "-KILL", "-f", "good_job_worker", "-P", pid.to_s)
+      system("pkill", "-KILL", "-f", "good_job_cluster_worker", "-P", pid.to_s)
       sleep(3) # Give the supervisor time to detect and restart
 
       # Supervisor should still be running

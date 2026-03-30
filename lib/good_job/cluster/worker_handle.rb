@@ -2,7 +2,7 @@
 
 module GoodJob
   class Cluster
-    # Represents a worker process from the master's perspective.
+    # Represents a worker process from the supervisor's perspective.
     # Tracks the worker's PID, IPC pipe, heartbeat, and lifecycle state.
     class WorkerHandle
       attr_reader :pid, :index, :read_pipe

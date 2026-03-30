@@ -4,9 +4,9 @@ require_relative "cluster/worker_handle"
 
 module GoodJob
   # Manages a pool of forked worker processes, each running a full {GoodJob::Capsule}.
-  # The master process monitors workers via pipes and restarts them if they crash.
+  # The supervisor process monitors workers via pipes and restarts them if they crash.
   class Cluster
-    # Seconds between health checks in the master event loop
+    # Seconds between health checks in the supervisor event loop
     MONITOR_INTERVAL = 5
     # Seconds without a heartbeat before a worker is considered dead
     HEARTBEAT_TIMEOUT = 30
@@ -37,16 +37,17 @@ module GoodJob
       @wakeup_reader, @wakeup_writer = IO.pipe
     end
 
-    # Start the cluster: fork workers, run the master event loop, and block until shutdown.
+    # Start the cluster: fork workers, run the supervisor event loop, and block until shutdown.
     # @return [void]
     def run
       self.class.instance = self
+      $0 = "good_job_cluster_supervisor"
 
-      prepare_master_process
+      prepare_supervisor_process
       setup_signals
       fork_workers
 
-      master_loop
+      supervisor_loop
     ensure
       cleanup
       self.class.instance = nil
@@ -90,7 +91,7 @@ module GoodJob
     end
 
     def fork_worker(index)
-      prepare_master_for_forking
+      prepare_supervisor_for_forking
       reader, writer = IO.pipe
 
       pid = ::Process.fork do
@@ -101,10 +102,10 @@ module GoodJob
       @restart_backoff[index][:next_restart_at] = nil
       handle = WorkerHandle.new(pid: pid, index: index, read_pipe: reader)
       @workers << handle
-      GoodJob.logger.info("GoodJob cluster master spawned worker #{index} (PID: #{pid})")
+      GoodJob.logger.info("GoodJob cluster supervisor spawned worker #{index} (PID: #{pid})")
     end
 
-    def master_loop
+    def supervisor_loop
       until @shutting_down
         readable_pipes = @workers.map(&:read_pipe).compact + [@wakeup_reader]
         readable, = IO.select(readable_pipes, nil, nil, monitor_timeout)
@@ -255,16 +256,16 @@ module GoodJob
       @wakeup_writer.close unless @wakeup_writer.closed?
     end
 
-    def prepare_master_process
+    def prepare_supervisor_process
       # If GoodJob async execution was started during application boot, stop it
-      # before any workers fork so the master stays quiescent and COW-friendly.
+      # before any workers fork so the supervisor stays quiescent and COW-friendly.
       GoodJob.shutdown(timeout: @configuration.shutdown_timeout)
       GoodJob._run_before_fork_callbacks
       disconnect_database_connections!
     end
 
-    def prepare_master_for_forking
-      # The cluster master should not hold live database sockets across a
+    def prepare_supervisor_for_forking
+      # The cluster supervisor should not hold live database sockets across a
       # worker fork. Keep this cheap and repeatable so crash restarts also fork
       # from a quiescent parent.
       disconnect_database_connections!
@@ -336,7 +337,7 @@ module GoodJob
       # New connections will be established lazily.
       ActiveRecord::ConnectionAdapters::PoolConfig.discard_pools!
 
-      # Workers ignore SIGINT; the master sends SIGTERM when shutting down
+      # Workers ignore SIGINT; the supervisor sends SIGTERM when shutting down
       trap("INT", "IGNORE")
       trap("CHLD", "DEFAULT")
 
@@ -351,8 +352,8 @@ module GoodJob
       # QUIT = immediate exit without waiting for jobs to finish
       trap("QUIT") { exit! }
 
-      master_pid = ::Process.ppid
-      $0 = "good_job_worker.#{index}"
+      supervisor_pid = ::Process.ppid
+      $0 = "good_job_cluster_worker.#{index}"
 
       GoodJob.configuration = @configuration
       GoodJob._run_after_fork_callbacks
@@ -374,7 +375,7 @@ module GoodJob
 
       Kernel.loop do
         stop_event.wait(GoodJob::CLI::SHUTDOWN_EVENT_TIMEOUT)
-        break if stop_event.set? || capsule.shutdown? || master_pid != ::Process.ppid
+        break if stop_event.set? || capsule.shutdown? || supervisor_pid != ::Process.ppid
       end
 
       capsule.shutdown(timeout: @configuration.shutdown_timeout)

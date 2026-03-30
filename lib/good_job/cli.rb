@@ -109,7 +109,7 @@ module GoodJob
     method_option :workers,
                   type: :numeric,
                   banner: 'COUNT',
-                  desc: "Number of worker processes to fork. Master process manages workers and runs health checks. (env var: GOOD_JOB_WORKERS, default: 0)"
+                  desc: "Number of worker processes to fork. Supervisor process manages workers and runs health checks. (env var: GOOD_JOB_WORKERS, default: 0)"
     method_option :worker_shutdown_timeout,
                   type: :numeric,
                   banner: 'SECONDS',

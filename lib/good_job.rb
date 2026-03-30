@@ -136,7 +136,7 @@ module GoodJob
   end
 
   # Register a callback to run in the parent process before cluster workers fork.
-  # @yield Runs before a worker is forked from the cluster master process.
+  # @yield Runs before a worker is forked from the cluster supervisor process.
   # @return [Proc]
   def self.before_fork(&block)
     raise ArgumentError, "GoodJob.before_fork requires a block" unless block
