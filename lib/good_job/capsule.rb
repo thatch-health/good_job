@@ -80,6 +80,18 @@ module GoodJob
       @started_at.present?
     end
 
+    # Whether the scheduler portion of the capsule is running for health checks.
+    # @return [Boolean]
+    def started_for_healthcheck?
+      @multi_scheduler.present? && @multi_scheduler.running?
+    end
+
+    # Whether the scheduler is running and the notifier has an active database connection.
+    # @return [Boolean]
+    def connected_for_healthcheck?
+      started_for_healthcheck? && @notifier.present? && @notifier.connected?
+    end
+
     # @return [Boolean] Whether the capsule has been shutdown.
     def shutdown?
       [@notifier, @poller, @multi_scheduler, @cron_manager].compact.all?(&:shutdown?)

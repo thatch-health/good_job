@@ -136,6 +136,21 @@ describe GoodJob do
     end
   end
 
+  describe '.before_fork and .after_fork' do
+    it 'register callbacks' do
+      before_callback = described_class.before_fork { nil }
+      after_callback = described_class.after_fork { nil }
+
+      expect(described_class._before_fork_callbacks).to include(before_callback)
+      expect(described_class._after_fork_callbacks).to include(after_callback)
+    end
+
+    it 'requires blocks' do
+      expect { described_class.before_fork }.to raise_error(ArgumentError)
+      expect { described_class.after_fork }.to raise_error(ArgumentError)
+    end
+  end
+
   describe '.perform_inline' do
     before do
       stub_const 'PERFORMED', []

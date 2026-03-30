@@ -110,6 +110,10 @@ module GoodJob
                   type: :numeric,
                   banner: 'COUNT',
                   desc: "Number of worker processes to fork. Master process manages workers and runs health checks. (env var: GOOD_JOB_WORKERS, default: 0)"
+    method_option :worker_shutdown_timeout,
+                  type: :numeric,
+                  banner: 'SECONDS',
+                  desc: "Number of seconds to wait for workers to exit before escalating shutdown. (env var: GOOD_JOB_WORKER_SHUTDOWN_TIMEOUT, default: 25)"
 
     def start
       set_up_application!
@@ -118,36 +122,25 @@ module GoodJob
 
       Daemon.new(pidfile: configuration.pidfile).daemonize if configuration.daemonize?
 
+      systemd = GoodJob::SystemdService.new
+      probe_server = configuration.probe_port ? GoodJob::ProbeServer.new(app: configuration.probe_app, port: configuration.probe_port, handler: configuration.probe_handler) : nil
+
+      systemd.start
+      probe_server&.start
+
       if configuration.workers.positive?
         require_relative "cluster"
-        cluster = GoodJob::Cluster.new(configuration: configuration)
-        cluster.run
+        GoodJob::Cluster.new(configuration: configuration).run
       else
-        capsule = GoodJob.capsule
-        systemd = GoodJob::SystemdService.new
-
-        capsule.start
-        systemd.start
-
-        if configuration.probe_port
-          probe_server = GoodJob::ProbeServer.new(app: configuration.probe_app, port: configuration.probe_port, handler: configuration.probe_handler)
-          probe_server.start
-        end
-
-        require 'concurrent/atomic/event'
-        @stop_good_job_executable = Concurrent::Event.new
-        %w[INT TERM].each do |signal|
-          trap(signal) { Thread.new { @stop_good_job_executable.set }.join }
-        end
-
-        loop_wait = configuration.idle_timeout ? SHUTDOWN_EVENT_TIMEOUT_FOR_IDLE_TIMEOUT : SHUTDOWN_EVENT_TIMEOUT
-        Kernel.loop do
-          @stop_good_job_executable.wait(loop_wait)
-          break if @stop_good_job_executable.set? || capsule.shutdown? || (configuration.idle_timeout && capsule.idle?(configuration.idle_timeout))
-        end
-
+        run_single_process(configuration: configuration)
         systemd.stop do
-          capsule.shutdown(timeout: configuration.shutdown_timeout)
+          GoodJob.capsule.shutdown(timeout: configuration.shutdown_timeout)
+          probe_server&.stop
+        end
+      end
+    ensure
+      if configuration&.workers&.positive?
+        systemd&.stop do
           probe_server&.stop
         end
       end
@@ -177,6 +170,22 @@ module GoodJob
     end
 
     no_commands do
+      def run_single_process(configuration:)
+        GoodJob.capsule.start
+
+        require 'concurrent/atomic/event'
+        @stop_good_job_executable = Concurrent::Event.new
+        %w[INT TERM].each do |signal|
+          trap(signal) { Thread.new { @stop_good_job_executable.set }.join }
+        end
+
+        loop_wait = configuration.idle_timeout ? SHUTDOWN_EVENT_TIMEOUT_FOR_IDLE_TIMEOUT : SHUTDOWN_EVENT_TIMEOUT
+        Kernel.loop do
+          @stop_good_job_executable.wait(loop_wait)
+          break if @stop_good_job_executable.set? || GoodJob.capsule.shutdown? || (configuration.idle_timeout && GoodJob.capsule.idle?(configuration.idle_timeout))
+        end
+      end
+
       # Load the current Rails application and configuration that the good_job
       # command-line tool should be working within.
       #

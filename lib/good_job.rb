@@ -110,6 +110,18 @@ module GoodJob
   #   @return [GoodJob::Configuration, nil]
   mattr_accessor :configuration, default: GoodJob::Configuration.new({})
 
+  # @!attribute [rw] _before_fork_callbacks
+  #   @!scope class
+  #   Callbacks to run in the parent process before cluster workers fork.
+  #   @return [Array<Proc>]
+  mattr_accessor :_before_fork_callbacks, default: Concurrent::Array.new
+
+  # @!attribute [rw] _after_fork_callbacks
+  #   @!scope class
+  #   Callbacks to run in the child process immediately after a worker forks.
+  #   @return [Array<Proc>]
+  mattr_accessor :_after_fork_callbacks, default: Concurrent::Array.new
+
   # @!attribute [rw] capsule
   #   @!scope class
   #   Global/default execution capsule for GoodJob.
@@ -121,6 +133,36 @@ module GoodJob
   # @return [void]
   def self._on_thread_error(exception)
     on_thread_error.call(exception) if on_thread_error.respond_to?(:call)
+  end
+
+  # Register a callback to run in the parent process before cluster workers fork.
+  # @yield Runs before a worker is forked from the cluster master process.
+  # @return [Proc]
+  def self.before_fork(&block)
+    raise ArgumentError, "GoodJob.before_fork requires a block" unless block
+
+    _before_fork_callbacks << block
+    block
+  end
+
+  # Register a callback to run in the child process after a cluster worker forks.
+  # @yield Runs in the forked worker before GoodJob starts worker-local runtime state.
+  # @return [Proc]
+  def self.after_fork(&block)
+    raise ArgumentError, "GoodJob.after_fork requires a block" unless block
+
+    _after_fork_callbacks << block
+    block
+  end
+
+  # @!visibility private
+  def self._run_before_fork_callbacks
+    _before_fork_callbacks.each(&:call)
+  end
+
+  # @!visibility private
+  def self._run_after_fork_callbacks
+    _after_fork_callbacks.each(&:call)
   end
 
   # Custom Active Record configuration that is class_eval'ed into +GoodJob::BaseRecord+

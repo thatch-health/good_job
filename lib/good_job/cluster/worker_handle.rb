@@ -6,7 +6,7 @@ module GoodJob
     # Tracks the worker's PID, IPC pipe, heartbeat, and lifecycle state.
     class WorkerHandle
       attr_reader :pid, :index, :read_pipe
-      attr_accessor :last_heartbeat, :booted, :shutting_down
+      attr_accessor :last_heartbeat, :booted, :connected, :shutting_down, :healthy_since
 
       # @param pid [Integer] The worker's process ID
       # @param index [Integer] The worker's index (0-based)
@@ -17,7 +17,10 @@ module GoodJob
         @read_pipe = read_pipe
         @last_heartbeat = ::Process.clock_gettime(::Process::CLOCK_MONOTONIC)
         @booted = false
+        @connected = false
         @shutting_down = false
+        @healthy_since = nil
+        @buffer = +""
       end
 
       # Whether the worker process is still alive.
@@ -43,6 +46,22 @@ module GoodJob
         ::Process.kill(sig, @pid)
       rescue Errno::ESRCH
         nil
+      end
+
+      # Accumulate worker IPC data until full messages can be read.
+      # @param chunk [String]
+      # @return [void]
+      def append_data(chunk)
+        @buffer << chunk
+      end
+
+      # Return the next complete IPC message, or nil if the buffer is incomplete.
+      # @return [String, nil]
+      def shift_message
+        line_end = @buffer.index("\n")
+        return unless line_end
+
+        @buffer.slice!(0..line_end).chomp
       end
 
       # Close the IPC pipe.

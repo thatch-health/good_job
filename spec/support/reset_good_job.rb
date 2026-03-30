@@ -65,6 +65,9 @@ RSpec.configure do |config|
     expect(GoodJob::Capsule.instances).to all be_shutdown
     GoodJob::Capsule.instances.clear
 
+    GoodJob._before_fork_callbacks.clear
+    GoodJob._after_fork_callbacks.clear
+
     # always make sure there is a capsule; unstub it first if necessary
     RSpec::Mocks.space.proxy_for(GoodJob::Capsule).reset
     GoodJob.capsule = GoodJob::Capsule.new

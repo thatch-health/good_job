@@ -109,14 +109,14 @@ RSpec.describe GoodJob::ProbeServer::HealthcheckMiddleware do
       describe '/status/connected' do
         let(:path) { '/status/connected' }
 
-        it 'returns 200 when all workers are healthy' do
-          allow(cluster).to receive(:all_workers_healthy?).and_return(true)
+        it 'returns 200 when all workers are connected' do
+          allow(cluster).to receive(:all_workers_connected?).and_return(true)
           response = healthcheck_middleware.call(env)
           expect(response[0]).to eq(200)
         end
 
-        it 'returns 503 when not all workers are healthy' do
-          allow(cluster).to receive(:all_workers_healthy?).and_return(false)
+        it 'returns 503 when not all workers are connected' do
+          allow(cluster).to receive(:all_workers_connected?).and_return(false)
           response = healthcheck_middleware.call(env)
           expect(response[0]).to eq(503)
         end

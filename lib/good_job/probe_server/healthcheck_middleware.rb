@@ -20,7 +20,7 @@ module GoodJob
           started ? [200, {}, ["Started"]] : [503, {}, ["Not started"]]
         when '/status/connected'
           connected = if defined?(GoodJob::Cluster) && GoodJob::Cluster.instance
-                        GoodJob::Cluster.instance.all_workers_healthy?
+                        GoodJob::Cluster.instance.all_workers_connected?
                       else
                         GoodJob::Scheduler.instances.any? && GoodJob::Scheduler.instances.all?(&:running?) &&
                           GoodJob::Notifier.instances.any? && GoodJob::Notifier.instances.all?(&:connected?)

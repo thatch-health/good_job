@@ -62,4 +62,22 @@ RSpec.describe GoodJob::Cluster::WorkerHandle do
       expect(read_pipe).not_to have_received(:close)
     end
   end
+
+  describe 'IPC buffering' do
+    it 'returns complete messages in order' do
+      handle.append_data("s10\ns11\n")
+
+      expect(handle.shift_message).to eq("s10")
+      expect(handle.shift_message).to eq("s11")
+      expect(handle.shift_message).to be_nil
+    end
+
+    it 'waits until a newline before returning a message' do
+      handle.append_data("s10")
+      expect(handle.shift_message).to be_nil
+
+      handle.append_data("\n")
+      expect(handle.shift_message).to eq("s10")
+    end
+  end
 end

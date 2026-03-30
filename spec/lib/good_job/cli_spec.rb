@@ -136,6 +136,15 @@ RSpec.describe GoodJob::CLI do
     end
 
     describe 'cluster mode' do
+      let(:systemd) { instance_double GoodJob::SystemdService, start: nil, stop: nil }
+      let(:probe_server) { instance_double GoodJob::ProbeServer, start: nil, stop: nil }
+
+      before do
+        allow(GoodJob::SystemdService).to receive(:new).and_return(systemd)
+        allow(GoodJob::ProbeServer).to receive(:new).and_return(probe_server)
+        allow(systemd).to receive(:stop).and_yield
+      end
+
       it 'delegates to GoodJob::Cluster when workers > 0' do
         cluster_mock = instance_double(GoodJob::Cluster, run: nil)
         allow(GoodJob::Cluster).to receive(:new).and_return(cluster_mock)
@@ -147,6 +156,8 @@ RSpec.describe GoodJob::CLI do
         expect(GoodJob::Cluster).to have_received(:new)
         expect(cluster_mock).to have_received(:run)
         expect(capsule_mock).not_to have_received(:start)
+        expect(systemd).to have_received(:start)
+        expect(systemd).to have_received(:stop)
       end
 
       it 'uses single-process mode when workers is 0' do
@@ -156,6 +167,18 @@ RSpec.describe GoodJob::CLI do
         cli.start
 
         expect(capsule_mock).to have_received(:start)
+      end
+
+      it 'starts and stops a probe server in cluster mode' do
+        cluster_mock = instance_double(GoodJob::Cluster, run: nil)
+        allow(GoodJob::Cluster).to receive(:new).and_return(cluster_mock)
+
+        cli = described_class.new([], { workers: 2, probe_port: 3838 }, {})
+        cli.start
+
+        expect(GoodJob::ProbeServer).to have_received(:new).with(app: nil, port: 3838, handler: nil)
+        expect(probe_server).to have_received(:start)
+        expect(probe_server).to have_received(:stop)
       end
     end
 
