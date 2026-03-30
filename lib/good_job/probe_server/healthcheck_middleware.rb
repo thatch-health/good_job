@@ -12,11 +12,19 @@ module GoodJob
         when '/', '/status'
           [200, {}, ["OK"]]
         when '/status/started'
-          started = GoodJob::Scheduler.instances.any? && GoodJob::Scheduler.instances.all?(&:running?)
+          started = if defined?(GoodJob::Cluster) && GoodJob::Cluster.instance
+                      GoodJob::Cluster.instance.all_workers_booted?
+                    else
+                      GoodJob::Scheduler.instances.any? && GoodJob::Scheduler.instances.all?(&:running?)
+                    end
           started ? [200, {}, ["Started"]] : [503, {}, ["Not started"]]
         when '/status/connected'
-          connected = GoodJob::Scheduler.instances.any? && GoodJob::Scheduler.instances.all?(&:running?) &&
-                      GoodJob::Notifier.instances.any? && GoodJob::Notifier.instances.all?(&:connected?)
+          connected = if defined?(GoodJob::Cluster) && GoodJob::Cluster.instance
+                        GoodJob::Cluster.instance.all_workers_healthy?
+                      else
+                        GoodJob::Scheduler.instances.any? && GoodJob::Scheduler.instances.all?(&:running?) &&
+                          GoodJob::Notifier.instances.any? && GoodJob::Notifier.instances.all?(&:connected?)
+                      end
           connected ? [200, {}, ["Connected"]] : [503, {}, ["Not connected"]]
         else
           @app.call(env)

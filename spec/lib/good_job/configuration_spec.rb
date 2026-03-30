@@ -324,6 +324,46 @@ RSpec.describe GoodJob::Configuration do
     end
   end
 
+  describe '#workers' do
+    it 'defaults to 0' do
+      configuration = described_class.new({})
+      expect(configuration.workers).to eq 0
+    end
+
+    it 'can be set with options' do
+      configuration = described_class.new({ workers: 3 })
+      expect(configuration.workers).to eq 3
+    end
+
+    it 'can be set with an environment variable' do
+      configuration = described_class.new({}, env: ENV.to_hash.merge({ 'GOOD_JOB_WORKERS' => '4' }))
+      expect(configuration.workers).to eq 4
+    end
+
+    it 'can be set with rails config' do
+      allow(Rails.application.config).to receive(:good_job).and_return({ workers: 2 })
+      configuration = described_class.new({})
+      expect(configuration.workers).to eq 2
+    end
+  end
+
+  describe '#worker_shutdown_timeout' do
+    it 'defaults to 25' do
+      configuration = described_class.new({})
+      expect(configuration.worker_shutdown_timeout).to eq 25.0
+    end
+
+    it 'can be set with options' do
+      configuration = described_class.new({ worker_shutdown_timeout: 10 })
+      expect(configuration.worker_shutdown_timeout).to eq 10.0
+    end
+
+    it 'can be set with an environment variable' do
+      configuration = described_class.new({}, env: ENV.to_hash.merge({ 'GOOD_JOB_WORKER_SHUTDOWN_TIMEOUT' => '15' }))
+      expect(configuration.worker_shutdown_timeout).to eq 15.0
+    end
+  end
+
   describe '#advisory_lock_heartbeat' do
     it 'defaults to true in development' do
       allow(Rails).to receive(:env) { "development".inquiry }

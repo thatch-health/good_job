@@ -79,6 +79,50 @@ RSpec.describe GoodJob::ProbeServer::HealthcheckMiddleware do
       end
     end
 
+    context 'when in cluster mode' do
+      let(:cluster) { instance_double(GoodJob::Cluster) }
+
+      before do
+        GoodJob::Cluster.instance = cluster
+      end
+
+      after do
+        GoodJob::Cluster.instance = nil
+      end
+
+      describe '/status/started' do
+        let(:path) { '/status/started' }
+
+        it 'returns 200 when all workers are booted' do
+          allow(cluster).to receive(:all_workers_booted?).and_return(true)
+          response = healthcheck_middleware.call(env)
+          expect(response[0]).to eq(200)
+        end
+
+        it 'returns 503 when not all workers are booted' do
+          allow(cluster).to receive(:all_workers_booted?).and_return(false)
+          response = healthcheck_middleware.call(env)
+          expect(response[0]).to eq(503)
+        end
+      end
+
+      describe '/status/connected' do
+        let(:path) { '/status/connected' }
+
+        it 'returns 200 when all workers are healthy' do
+          allow(cluster).to receive(:all_workers_healthy?).and_return(true)
+          response = healthcheck_middleware.call(env)
+          expect(response[0]).to eq(200)
+        end
+
+        it 'returns 503 when not all workers are healthy' do
+          allow(cluster).to receive(:all_workers_healthy?).and_return(false)
+          response = healthcheck_middleware.call(env)
+          expect(response[0]).to eq(503)
+        end
+      end
+    end
+
     describe 'forwarding unknown requests to given app' do
       let(:path) { '/unhandled_path' }
 

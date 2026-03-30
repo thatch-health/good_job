@@ -39,6 +39,10 @@ module GoodJob
     DEFAULT_ENQUEUE_AFTER_TRANSACTION_COMMIT = false
     # Default enable_pauses setting
     DEFAULT_ENABLE_PAUSES = false
+    # Default number of worker processes (0 = single-process mode)
+    DEFAULT_WORKERS = 0
+    # Default number of seconds to wait for worker processes to exit before SIGKILL
+    DEFAULT_WORKER_SHUTDOWN_TIMEOUT = 25
 
     def self.validate_execution_mode(execution_mode)
       raise ArgumentError, "GoodJob execution mode must be one of #{EXECUTION_MODES.join(', ')}. It was '#{execution_mode}' which is not valid." unless execution_mode.in?(EXECUTION_MODES)
@@ -372,6 +376,28 @@ module GoodJob
       return rails_config[:enqueue_after_transaction_commit] unless rails_config[:enqueue_after_transaction_commit].nil?
 
       DEFAULT_ENQUEUE_AFTER_TRANSACTION_COMMIT
+    end
+
+    # Number of worker processes to fork. 0 means single-process mode (no forking).
+    # @return [Integer]
+    def workers
+      (
+        options[:workers] ||
+          rails_config[:workers] ||
+          env['GOOD_JOB_WORKERS'] ||
+          DEFAULT_WORKERS
+      ).to_i
+    end
+
+    # The number of seconds to wait for worker processes to exit before sending SIGKILL.
+    # @return [Float]
+    def worker_shutdown_timeout
+      (
+        options[:worker_shutdown_timeout] ||
+          rails_config[:worker_shutdown_timeout] ||
+          env['GOOD_JOB_WORKER_SHUTDOWN_TIMEOUT'] ||
+          DEFAULT_WORKER_SHUTDOWN_TIMEOUT
+      ).to_f
     end
 
     # Whether the job processing can be paused.

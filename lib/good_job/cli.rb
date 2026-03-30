@@ -106,39 +106,50 @@ module GoodJob
                   type: :numeric,
                   banner: 'COUNT',
                   desc: "The number of queued jobs to select when polling for a job to run. (env var: GOOD_JOB_QUEUE_SELECT_LIMIT, default: nil)"
+    method_option :workers,
+                  type: :numeric,
+                  banner: 'COUNT',
+                  desc: "Number of worker processes to fork. Master process manages workers and runs health checks. (env var: GOOD_JOB_WORKERS, default: 0)"
 
     def start
       set_up_application!
       GoodJob.configuration.options.merge!(options.symbolize_keys)
       configuration = GoodJob.configuration
-      capsule = GoodJob.capsule
-      systemd = GoodJob::SystemdService.new
 
       Daemon.new(pidfile: configuration.pidfile).daemonize if configuration.daemonize?
 
-      capsule.start
-      systemd.start
+      if configuration.workers.positive?
+        require_relative "cluster"
+        cluster = GoodJob::Cluster.new(configuration: configuration)
+        cluster.run
+      else
+        capsule = GoodJob.capsule
+        systemd = GoodJob::SystemdService.new
 
-      if configuration.probe_port
-        probe_server = GoodJob::ProbeServer.new(app: configuration.probe_app, port: configuration.probe_port, handler: configuration.probe_handler)
-        probe_server.start
-      end
+        capsule.start
+        systemd.start
 
-      require 'concurrent/atomic/event'
-      @stop_good_job_executable = Concurrent::Event.new
-      %w[INT TERM].each do |signal|
-        trap(signal) { Thread.new { @stop_good_job_executable.set }.join }
-      end
+        if configuration.probe_port
+          probe_server = GoodJob::ProbeServer.new(app: configuration.probe_app, port: configuration.probe_port, handler: configuration.probe_handler)
+          probe_server.start
+        end
 
-      loop_wait = configuration.idle_timeout ? SHUTDOWN_EVENT_TIMEOUT_FOR_IDLE_TIMEOUT : SHUTDOWN_EVENT_TIMEOUT
-      Kernel.loop do
-        @stop_good_job_executable.wait(loop_wait)
-        break if @stop_good_job_executable.set? || capsule.shutdown? || (configuration.idle_timeout && capsule.idle?(configuration.idle_timeout))
-      end
+        require 'concurrent/atomic/event'
+        @stop_good_job_executable = Concurrent::Event.new
+        %w[INT TERM].each do |signal|
+          trap(signal) { Thread.new { @stop_good_job_executable.set }.join }
+        end
 
-      systemd.stop do
-        capsule.shutdown(timeout: configuration.shutdown_timeout)
-        probe_server&.stop
+        loop_wait = configuration.idle_timeout ? SHUTDOWN_EVENT_TIMEOUT_FOR_IDLE_TIMEOUT : SHUTDOWN_EVENT_TIMEOUT
+        Kernel.loop do
+          @stop_good_job_executable.wait(loop_wait)
+          break if @stop_good_job_executable.set? || capsule.shutdown? || (configuration.idle_timeout && capsule.idle?(configuration.idle_timeout))
+        end
+
+        systemd.stop do
+          capsule.shutdown(timeout: configuration.shutdown_timeout)
+          probe_server&.stop
+        end
       end
     end
 

@@ -109,6 +109,7 @@ RSpec.describe GoodJob::CLI do
             probe_handler: nil,
             options: {},
             daemonize?: false,
+            workers: 0,
             shutdown_timeout: 100,
             idle_timeout: 100
           )
@@ -131,6 +132,30 @@ RSpec.describe GoodJob::CLI do
           expect(probe_server).not_to have_received(:start)
           expect(probe_server).not_to have_received(:stop)
         end
+      end
+    end
+
+    describe 'cluster mode' do
+      it 'delegates to GoodJob::Cluster when workers > 0' do
+        cluster_mock = instance_double(GoodJob::Cluster, run: nil)
+        allow(GoodJob::Cluster).to receive(:new).and_return(cluster_mock)
+        allow(GoodJob).to receive(:configuration).and_return(GoodJob::Configuration.new({ workers: 2 }))
+
+        cli = described_class.new([], { workers: 2 }, {})
+        cli.start
+
+        expect(GoodJob::Cluster).to have_received(:new)
+        expect(cluster_mock).to have_received(:run)
+        expect(capsule_mock).not_to have_received(:start)
+      end
+
+      it 'uses single-process mode when workers is 0' do
+        allow(Kernel).to receive(:loop)
+
+        cli = described_class.new([], { workers: 0 }, {})
+        cli.start
+
+        expect(capsule_mock).to have_received(:start)
       end
     end
 
