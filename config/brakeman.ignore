@@ -119,25 +119,25 @@
     {
       "warning_type": "SQL Injection",
       "warning_code": 0,
-      "fingerprint": "3f2f0feed3442f5946899d5884a014ecb86894269ac9685db90eeeb6f3a06f48",
+      "fingerprint": "d2f2ff316f7bcda067314b99920b2006deba6f92053f7cc5cd1160e5a8446b58",
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "app/models/good_job/job/lockable.rb",
-      "line": 80,
+      "line": 142,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
-      "code": "unscoped.find_by_sql([\"WITH candidate AS #{(\"MATERIALIZED \" or \"\")}(#{select(:id).lock(\"FOR NO KEY UPDATE SKIP LOCKED\").to_sql})\\nUPDATE #{quoted_table_name}\\nSET locked_by_id = ?,\\n    locked_at = ?,\\n    lock_type = ?\\nFROM (SELECT id FROM candidate #{if advisory then\n  advisory_key = advisory_lock_bigint_sql(\"#{_quoted_table_name_string} || '-' || id::text\")\n  \"WHERE pg_try_advisory_lock(#{advisory_lock_bigint_sql(\"#{_quoted_table_name_string} || '-' || id::text\")})\"\nend}) AS locked\\nWHERE #{quoted_table_name}.id = locked.id\\nRETURNING #{quoted_table_name}.*\\n\".squish, locked_by_id, locked_at, lock_types[lock_type.to_s]])",
+      "code": "unscoped.find_by_sql([\"#{with_sql}\\nUPDATE #{quoted_table_name}\\nSET #{\"locked_by_id = ?, locked_at = ?, lock_type = ?\"}\\nFROM #{claimable_sql}\\nWHERE #{quoted_table_name}.id = claimable.id\\nRETURNING #{quoted_table_name}.*\\n\".squish, *[locked_by_id, locked_at, lock_types[lock_type.to_s]]])",
       "render_path": null,
       "location": {
         "type": "method",
         "class": "GoodJob::Job",
-        "method": "with_row_lock_claim"
+        "method": "claim_record"
       },
-      "user_input": "if advisory then\n  advisory_key = advisory_lock_bigint_sql(\"#{_quoted_table_name_string} || '-' || id::text\")\n  \"WHERE pg_try_advisory_lock(#{advisory_lock_bigint_sql(\"#{_quoted_table_name_string} || '-' || id::text\")})\"\nend",
+      "user_input": "with_sql",
       "confidence": "Weak",
       "cwe_id": [
         89
       ],
-      "note": "Claim query refactored into with_row_lock_claim. Table names are Rails-quoted; candidate SQL is Rails-generated; the optional advisory predicate uses only the configured hash and an escaped table name. All varying claim values are bound. No untrusted SQL input."
+      "note": "Claim query built in claim_record. Table names are Rails-quoted; candidate SQL is Rails-generated; the optional advisory predicate uses only the configured hash and an escaped table name. All varying claim values are bound. No untrusted SQL input."
     }
   ],
   "brakeman_version": "8.0.4"

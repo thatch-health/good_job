@@ -43,7 +43,8 @@ RSpec.describe GoodJob::Job do
     end.value!
   end
 
-  failure_points = [:execution, :job, :destroy]
+  # The job and its execution are written in a single statement when the job completes
+  failure_points = [:completion, :destroy]
   [:advisory, :skiplocked, :hybrid].each do |strategy|
     context "with #{strategy} locking" do
       let(:lock_strategy) { strategy }
@@ -55,10 +56,9 @@ RSpec.describe GoodJob::Job do
       failure_points.each do |failure_point|
         it "recovers an interrupted job after its #{failure_point} write fails" do
           failed = false
-          target = failure_point == :execution ? GoodJob::Execution : described_class
-          method_name = failure_point == :destroy ? :destroy! : :save!
+          method_name = failure_point == :destroy ? :destroy! : :save_with_execution
           allow(GoodJob).to receive(:preserve_job_records).and_return(false) if failure_point == :destroy
-          allow_any_instance_of(target).to receive(method_name).and_wrap_original do |method, *args, **kwargs|
+          allow_any_instance_of(described_class).to receive(method_name).and_wrap_original do |method, *args, **kwargs|
             if method.receiver.finished_at.present? && !failed
               failed = true
               raise failure
@@ -93,7 +93,7 @@ RSpec.describe GoodJob::Job do
         batch = GoodJob::BatchRecord.create!(enqueued_at: Time.current)
         job.update!(batch_id: batch.id)
         allow_any_instance_of(job_class).to receive(:perform).and_raise(StandardError, 'job failed')
-        allow_any_instance_of(GoodJob::Execution).to receive(:save!).and_wrap_original do |method, *args, **kwargs|
+        allow_any_instance_of(described_class).to receive(:save_with_execution).and_wrap_original do |method, *args, **kwargs|
           raise failure if method.receiver.finished_at.present?
 
           method.call(*args, **kwargs)
@@ -105,9 +105,9 @@ RSpec.describe GoodJob::Job do
         expect(batch.reload.discarded_at).to be_nil
       end
 
-      it 'recovers after losing the PostgreSQL connection between completion writes', skip: RUBY_PLATFORM.include?('java') do
+      it 'recovers after losing the PostgreSQL connection while writing the completion', skip: RUBY_PLATFORM.include?('java') do
         disconnected = false
-        allow_any_instance_of(described_class).to receive(:save!).and_wrap_original do |method, *args, **kwargs|
+        allow_any_instance_of(described_class).to receive(:save_with_execution).and_wrap_original do |method, *args, **kwargs|
           if method.receiver.finished_at.present? && !disconnected
             disconnected = true
             terminate_connection!
@@ -131,22 +131,22 @@ RSpec.describe GoodJob::Job do
   it 'does not replay completion over a new owner after losing the advisory lock', skip: RUBY_PLATFORM.include?('java') do
     next_process_id = SecureRandom.uuid
     failed = false
-    allow_any_instance_of(described_class).to receive(:save!).and_wrap_original do |method, *args, **kwargs|
+    allow_any_instance_of(described_class).to receive(:save_with_execution).and_wrap_original do |method, *args, **kwargs|
       if method.receiver.finished_at.present? && !failed
         failed = true
         terminate_connection!
         rails_promise do
           described_class.find(job.id).update!(locked_by_id: next_process_id, locked_at: Time.current)
         end.value!
-        raise failure
       end
+      # The completion write runs on the terminated connection
       method.call(*args, **kwargs)
     end
 
     expect do
       described_class.perform_with_lock(lock_id: process_id, lock_strategy: :advisory)
     end.to raise_error do |error|
-      expect(error).to be_a(ActiveRecord::ConnectionNotEstablished).or be_a(PG::ConnectionBad)
+      expect(error).to be_a(ActiveRecord::ConnectionNotEstablished).or(be_a(ActiveRecord::ConnectionFailed)).or(be_a(PG::ConnectionBad))
     end
 
     expect(job.reload).to have_attributes(locked_by_id: next_process_id, finished_at: nil)
@@ -155,7 +155,7 @@ RSpec.describe GoodJob::Job do
 
   it 'keeps the worker registered while claim cleanup is waiting for the database' do
     allow(GoodJob.configuration).to receive(:lock_strategy).and_return(:skiplocked)
-    allow_any_instance_of(GoodJob::Execution).to receive(:save!).and_wrap_original do |method, *args, **kwargs|
+    allow_any_instance_of(described_class).to receive(:save_with_execution).and_wrap_original do |method, *args, **kwargs|
       raise failure if method.receiver.finished_at.present?
 
       method.call(*args, **kwargs)

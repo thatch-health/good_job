@@ -13,6 +13,16 @@ module GoodJob
       # Log a warning on the first failed release and then every this many attempts.
       RELEASE_CLAIM_RETRY_WARNING_EVERY = 10
 
+      # The {Execution} started by a claim, and the claimed job's +performed_at+
+      # from before the claim (present if a previous execution was interrupted).
+      StartedExecution = Struct.new(:execution, :previous_performed_at, keyword_init: true)
+
+      included do
+        # Set when the job was claimed with +start_execution: true+; consumed by {Job#perform}.
+        # @return [StartedExecution, nil]
+        attr_accessor :started_execution
+      end
+
       class_methods do
         # Claims a job by acquiring a session-level advisory lock via the CTE
         # query, and records the lock acquisition for phantom re-entrancy cleanup.
@@ -46,10 +56,12 @@ module GoodJob
         # @param locked_by_id [String] The process UUID claiming the job
         # @param locked_at [Time] When the job was claimed
         # @param lock_type [String, Symbol] Lock type identifier
+        # @param start_execution [Boolean] Whether the same statement also marks the job
+        #   as performing and inserts its {Execution} (see {#started_execution})
         # @yield [GoodJob::Job, nil] The claimed record, or nil if none found
         # @return [Object] The return value of the block
-        def with_skip_locked_claim(locked_by_id:, locked_at:, lock_type:, &block)
-          with_row_lock_claim(locked_by_id: locked_by_id, locked_at: locked_at, lock_type: lock_type, &block)
+        def with_skip_locked_claim(locked_by_id:, locked_at:, lock_type:, start_execution: false, &block)
+          with_row_lock_claim(locked_by_id: locked_by_id, locked_at: locked_at, lock_type: lock_type, start_execution: start_execution, &block)
         end
 
         # Atomically claims a job using SELECT FOR NO KEY UPDATE SKIP LOCKED with an
@@ -60,37 +72,32 @@ module GoodJob
         # @param locked_by_id [String] The process UUID claiming the job
         # @param locked_at [Time] When the job was claimed
         # @param lock_type [String, Symbol] Lock type identifier
+        # @param start_execution [Boolean] Whether the same statement also marks the job
+        #   as performing and inserts its {Execution} (see {#started_execution})
         # @yield [GoodJob::Job, nil] The claimed record, or nil if none found
         # @return [Object] The return value of the block
-        def with_hybrid_lock_claim(locked_by_id:, locked_at:, lock_type:, &block)
-          with_row_lock_claim(locked_by_id: locked_by_id, locked_at: locked_at, lock_type: lock_type, advisory: true, &block)
+        def with_hybrid_lock_claim(locked_by_id:, locked_at:, lock_type:, start_execution: false, &block)
+          with_row_lock_claim(locked_by_id: locked_by_id, locked_at: locked_at, lock_type: lock_type, start_execution: start_execution, advisory: true, &block)
         end
 
         private
 
-        def with_row_lock_claim(locked_by_id:, locked_at:, lock_type:, advisory: false, &block)
+        def with_row_lock_claim(locked_by_id:, locked_at:, lock_type:, start_execution: false, advisory: false, &block)
           raise ArgumentError, "Must provide a block" unless block
 
           connection = lease_connection if advisory # retain the session holding the advisory lock
-          candidate_sql = select(:id).lock("FOR NO KEY UPDATE SKIP LOCKED").to_sql
+          candidate_sql = select(:id, :performed_at).lock("FOR NO KEY UPDATE SKIP LOCKED").to_sql
           materialized = supports_cte_materialization_specifiers? ? "MATERIALIZED " : ""
           candidate_filter = if advisory
                                advisory_key = advisory_lock_bigint_sql("#{_quoted_table_name_string} || '-' || id::text")
                                "WHERE pg_try_advisory_lock(#{advisory_key})"
                              end
 
-          sql = <<~SQL.squish
-            WITH candidate AS #{materialized}(#{candidate_sql})
-            UPDATE #{quoted_table_name}
-            SET locked_by_id = ?,
-                locked_at = ?,
-                lock_type = ?
-            FROM (SELECT id FROM candidate #{candidate_filter}) AS locked
-            WHERE #{quoted_table_name}.id = locked.id
-            RETURNING #{quoted_table_name}.*
-          SQL
-
-          record = unscoped.find_by_sql([sql, locked_by_id, locked_at, lock_types[lock_type.to_s]]).first
+          record = claim_record(
+            "WITH candidate AS #{materialized}(#{candidate_sql})",
+            "(SELECT id, performed_at FROM candidate #{candidate_filter}) AS claimable",
+            locked_by_id: locked_by_id, locked_at: locked_at, lock_type: lock_type, start_execution: start_execution
+          )
           record_advisory_lock(connection, record.lockable_column_key, cte: true) if advisory && record
 
           completed = false
@@ -110,6 +117,81 @@ module GoodJob
             end
             record&.run_callbacks(:perform_unlocked) if completed
           end
+        end
+
+        # Sets the lock columns of the job selected by +claimable_sql+ (a +FROM+ item
+        # aliased +claimable+ with +id+ and +performed_at+ columns), and returns it.
+        #
+        # With +start_execution+, the same statement also does the work that
+        # {Job#perform} would otherwise do in a separate statement before running
+        # the job: it sets +performed_at+, increments +executions_count+, and
+        # inserts the {Execution}, which is assigned to {#started_execution}.
+        def claim_record(with_sql, claimable_sql, locked_by_id:, locked_at:, lock_type:, start_execution:)
+          lock_values = [locked_by_id, locked_at, lock_types[lock_type.to_s]]
+          lock_assignments = "locked_by_id = ?, locked_at = ?, lock_type = ?"
+
+          unless start_execution
+            sql = <<~SQL.squish
+              #{with_sql}
+              UPDATE #{quoted_table_name}
+              SET #{lock_assignments}
+              FROM #{claimable_sql}
+              WHERE #{quoted_table_name}.id = claimable.id
+              RETURNING #{quoted_table_name}.*
+            SQL
+            return unscoped.find_by_sql([sql, *lock_values]).first
+          end
+
+          performed_at = Time.current
+          execution_id = SecureRandom.uuid
+          sql = <<~SQL.squish
+            #{with_sql},
+            claimed AS (
+              UPDATE #{quoted_table_name}
+              SET #{lock_assignments},
+                  performed_at = ?,
+                  executions_count = COALESCE(#{quoted_table_name}.executions_count, 0) + 1,
+                  updated_at = ?
+              FROM #{claimable_sql}
+              WHERE #{quoted_table_name}.id = claimable.id
+              RETURNING #{quoted_table_name}.*, claimable.performed_at AS previous_performed_at
+            ),
+            started_execution AS (
+              INSERT INTO #{GoodJob::Execution.quoted_table_name}
+                (id, active_job_id, job_class, queue_name, serialized_params, scheduled_at, created_at, updated_at, process_id)
+              SELECT ?, id, job_class, queue_name, serialized_params, COALESCE(scheduled_at, created_at), ?, ?, ?
+              FROM claimed
+            )
+            SELECT * FROM claimed
+          SQL
+          binds = [*lock_values, performed_at, performed_at, execution_id, performed_at, performed_at, locked_by_id]
+          result = connection_pool.with_connection do |connection|
+            connection.select_all(sanitize_sql_array([sql, *binds]), "#{name} Claim")
+          end
+          row = result.first
+          return nil unless row
+
+          record = instantiate(row.except("previous_performed_at"))
+          # Mirrors the INSERT above
+          execution = GoodJob::Execution.instantiate(
+            GoodJob::Execution.column_names.index_with(nil).merge(
+              "id" => execution_id,
+              "active_job_id" => record.id,
+              "job_class" => record.job_class,
+              "queue_name" => record.queue_name,
+              "serialized_params" => record.serialized_params,
+              "scheduled_at" => record.scheduled_at || record.created_at,
+              "created_at" => performed_at,
+              "updated_at" => performed_at,
+              "process_id" => locked_by_id
+            )
+          )
+          execution.association(:job).target = record
+          record.started_execution = StartedExecution.new(
+            execution: execution,
+            previous_performed_at: type_for_attribute(:performed_at).deserialize(row["previous_performed_at"])
+          )
+          record
         end
 
         def release_lock_claim(record, locked_by_id:, locked_at:)

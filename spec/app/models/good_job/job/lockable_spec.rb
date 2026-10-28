@@ -77,6 +77,74 @@ RSpec.describe GoodJob::Job::Lockable do
       end
     end
 
+    it 'does not start an execution by default' do
+      create_job
+
+      GoodJob::Job.unfinished.where(locked_by_id: nil).limit(1)
+                  .with_skip_locked_claim(locked_by_id: process_id, locked_at: Time.current, lock_type: :skiplocked) do |claimed|
+        expect(claimed.started_execution).to be_nil
+        expect(claimed.performed_at).to be_nil
+      end
+      expect(GoodJob::Execution.count).to eq 0
+    end
+
+    context 'when start_execution is true' do
+      it 'marks the job as performing and inserts its execution in the claim' do
+        job = create_job(executions_count: 2)
+
+        GoodJob::Job.unfinished.where(locked_by_id: nil).limit(1)
+                    .with_skip_locked_claim(locked_by_id: process_id, locked_at: Time.current, lock_type: :skiplocked, start_execution: true) do |claimed|
+          expect(claimed).to have_attributes(performed_at: be_present, executions_count: 3, locked_by_id: process_id)
+          expect(claimed).not_to be_changed
+          expect(claimed.attributes.slice(*GoodJob::Job.column_names)).to eq job.reload.attributes.slice(*GoodJob::Job.column_names)
+
+          started = claimed.started_execution
+          expect(started.previous_performed_at).to be_nil
+          expect(started.execution).to be_persisted
+          expect(started.execution.attributes).to eq GoodJob::Execution.find(started.execution.id).attributes
+          expect(started.execution).to have_attributes(
+            active_job_id: job.id,
+            job_class: job.job_class,
+            queue_name: job.queue_name,
+            serialized_params: job.serialized_params,
+            scheduled_at: job.scheduled_at,
+            created_at: claimed.performed_at,
+            process_id: process_id,
+            finished_at: nil
+          )
+        end
+      end
+
+      it 'uses created_at as the execution scheduled_at when the job has no scheduled_at' do
+        job = create_job(scheduled_at: nil)
+
+        GoodJob::Job.unfinished.where(locked_by_id: nil).limit(1)
+                    .with_skip_locked_claim(locked_by_id: process_id, locked_at: Time.current, lock_type: :skiplocked, start_execution: true) do |claimed|
+          expect(claimed.started_execution.execution.scheduled_at).to eq job.created_at
+          expect(GoodJob::Execution.sole.scheduled_at).to eq job.created_at
+        end
+      end
+
+      it 'returns the performed_at from before the claim' do
+        previous_performed_at = 1.minute.ago.change(usec: 0)
+        create_job(performed_at: previous_performed_at)
+
+        GoodJob::Job.unfinished.where(locked_by_id: nil).limit(1)
+                    .with_skip_locked_claim(locked_by_id: process_id, locked_at: Time.current, lock_type: :skiplocked, start_execution: true) do |claimed|
+          expect(claimed.started_execution.previous_performed_at).to eq previous_performed_at
+          expect(claimed.performed_at).to be > previous_performed_at
+        end
+      end
+
+      it 'yields nil without inserting an execution when no eligible jobs exist' do
+        GoodJob::Job.unfinished.where(locked_by_id: nil).limit(1)
+                    .with_skip_locked_claim(locked_by_id: process_id, locked_at: Time.current, lock_type: :skiplocked, start_execution: true) do |claimed|
+          expect(claimed).to be_nil
+        end
+        expect(GoodJob::Execution.count).to eq 0
+      end
+    end
+
     it 'yields nil when no eligible jobs exist' do
       GoodJob::Job.unfinished.where(locked_by_id: nil).limit(1)
                   .with_skip_locked_claim(locked_by_id: process_id, locked_at: Time.current, lock_type: :skiplocked) do |claimed|
@@ -173,6 +241,20 @@ RSpec.describe GoodJob::Job::Lockable do
         expect(claimed.locked_by_id).to eq process_id
         expect(claimed.lock_type).to eq 'hybrid'
         expect(claimed.locked_at).to be_present
+        expect(PgLock.current_database.advisory_lock.owns.count).to eq 1
+      end
+    end
+
+    it 'marks the job as performing and inserts its execution in the claim when start_execution is true' do
+      previous_performed_at = 1.minute.ago.change(usec: 0)
+      job = create_job(performed_at: previous_performed_at)
+
+      GoodJob::Job.unfinished.where(locked_by_id: nil).limit(1)
+                  .with_hybrid_lock_claim(locked_by_id: process_id, locked_at: Time.current, lock_type: :hybrid, start_execution: true) do |claimed|
+        expect(claimed).to have_attributes(id: job.id, executions_count: 1, locked_by_id: process_id)
+        expect(claimed.performed_at).to be > previous_performed_at
+        expect(claimed.started_execution.previous_performed_at).to eq previous_performed_at
+        expect(claimed.started_execution.execution.attributes).to eq GoodJob::Execution.sole.attributes
         expect(PgLock.current_database.advisory_lock.owns.count).to eq 1
       end
     end

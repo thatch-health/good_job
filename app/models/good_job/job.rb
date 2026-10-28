@@ -441,7 +441,7 @@ module GoodJob
                 .only_scheduled
                 .exclude_paused
                 .limit(1)
-                .with_skip_locked_claim(locked_by_id: lock_id, locked_at: Time.current, lock_type: :skiplocked) do |job|
+                .with_skip_locked_claim(locked_by_id: lock_id, locked_at: Time.current, lock_type: :skiplocked, start_execution: true) do |job|
         if job
           yield(job) if block_given?
           job.perform(lock_id: lock_id, already_claimed: true)
@@ -464,7 +464,7 @@ module GoodJob
                 .only_scheduled
                 .exclude_paused
                 .limit(1)
-                .with_hybrid_lock_claim(locked_by_id: lock_id, locked_at: Time.current, lock_type: :hybrid) do |job|
+                .with_hybrid_lock_claim(locked_by_id: lock_id, locked_at: Time.current, lock_type: :hybrid, start_execution: true) do |job|
         if job
           yield(job) if block_given?
           job.perform(lock_id: lock_id, already_claimed: true)
@@ -778,14 +778,17 @@ module GoodJob
       run_callbacks(:perform) do
         raise PreviouslyPerformedError, 'Cannot perform a job that has already been performed' if finished_at
 
-        job_performed_at = Time.current
+        # When the claim already started the execution, it set performed_at and inserted the Execution
+        started = started_execution
+        self.started_execution = nil
+        job_performed_at = started ? performed_at : Time.current
         monotonic_start = ::Process.clock_gettime(::Process::CLOCK_MONOTONIC)
-        execution = nil
+        execution = started&.execution
         result = GoodJob::CurrentThread.within do |current_thread|
           current_thread.reset
           current_thread.job = self
 
-          existing_performed_at = performed_at
+          existing_performed_at = started ? started.previous_performed_at : performed_at
           if existing_performed_at
             current_thread.execution_interrupted = existing_performed_at
 
@@ -800,10 +803,12 @@ module GoodJob
               error_event: error_event,
               duration: monotonic_duration,
             }
-            executions.where(finished_at: nil).where.not(performed_at: nil).update_all(execution_attrs) # rubocop:disable Rails/SkipsModelValidations
+            interrupted_executions = executions.where(finished_at: nil).where.not(performed_at: nil)
+            interrupted_executions = interrupted_executions.where.not(id: execution.id) if execution
+            interrupted_executions.update_all(execution_attrs) # rubocop:disable Rails/SkipsModelValidations
           end
 
-          transaction do
+          unless execution
             execution_attrs = {
               job_class: job_class,
               queue_name: queue_name,
@@ -822,8 +827,8 @@ module GoodJob
               job_attrs[:lock_type] = :advisory if self.class.lock_type_column_exists?
             end
 
-            execution = executions.create!(execution_attrs)
-            update!(job_attrs)
+            assign_attributes(job_attrs)
+            execution = create_execution_and_save(execution_attrs)
           end
 
           ActiveSupport::Notifications.instrument("perform_job.good_job", { job: self, execution: execution, process_id: current_thread.process_id, thread_name: current_thread.thread_name }) do |instrument_payload|
@@ -908,10 +913,7 @@ module GoodJob
 
         assign_attributes(job_attributes)
         if finished_at.blank? || cron_key.present? || preserve_job_record?(result)
-          transaction do
-            execution.save!
-            save!
-          end
+          save_with_execution(execution)
         else
           destroy!
         end
@@ -955,6 +957,71 @@ module GoodJob
     end
 
     private
+
+    # Inserts a new {Execution} and writes this job's unsaved changes in a single
+    # statement. Equivalent to +transaction { executions.create!(attrs); save! }+,
+    # but with one database round trip instead of four.
+    # @param execution_attrs [Hash] Attributes for the new {Execution}
+    # @return [GoodJob::Execution]
+    def create_execution_and_save(execution_attrs)
+      self.updated_at = Time.current
+      execution_attrs = execution_attrs.merge(active_job_id: id, updated_at: updated_at)
+
+      result = self.class.connection_pool.with_connection do |connection|
+        binds = []
+        job_sql = update_changes_sql(self, connection, binds)
+        columns = execution_attrs.keys.map { |name| connection.quote_column_name(name) }
+        values = execution_attrs.map { |name, value| bind_placeholder(GoodJob::Execution, name, value, binds) }
+
+        sql = <<~SQL.squish
+          WITH updated_job AS (#{job_sql})
+          INSERT INTO #{GoodJob::Execution.quoted_table_name} (#{columns.join(', ')})
+          VALUES (#{values.join(', ')})
+          RETURNING *
+        SQL
+        connection.exec_query(self.class.pg_or_jdbc_query(sql), "GoodJob::Job Create Execution", binds)
+      end
+      changes_applied
+
+      GoodJob::Execution.instantiate(result.first).tap do |execution|
+        execution.association(:job).target = self
+      end
+    end
+
+    # Writes the unsaved changes of this job and its {Execution} in a single
+    # statement. Equivalent to +transaction { execution.save!; save! }+, but with
+    # one database round trip instead of four.
+    # @param execution [GoodJob::Execution]
+    # @return [void]
+    def save_with_execution(execution)
+      self.updated_at = execution.updated_at = Time.current
+
+      self.class.connection_pool.with_connection do |connection|
+        binds = []
+        execution_sql = update_changes_sql(execution, connection, binds)
+        job_sql = update_changes_sql(self, connection, binds)
+
+        sql = "WITH updated_execution AS (#{execution_sql}) #{job_sql}"
+        connection.exec_query(self.class.pg_or_jdbc_query(sql), "GoodJob::Job Save Execution", binds)
+      end
+      execution.changes_applied
+      changes_applied
+    end
+
+    # Builds an +UPDATE+ statement for the record's unsaved changes, appending its bind values to +binds+.
+    def update_changes_sql(record, connection, binds)
+      model = record.class
+      assignments = record.changes_to_save.map do |name, (_old_value, new_value)|
+        "#{connection.quote_column_name(name)} = #{bind_placeholder(model, name, new_value, binds)}"
+      end
+      "UPDATE #{model.quoted_table_name} SET #{assignments.join(', ')} " \
+        "WHERE #{model.quoted_primary_key} = #{bind_placeholder(model, model.primary_key, record.id, binds)}"
+    end
+
+    def bind_placeholder(model, name, value, binds)
+      binds << ActiveRecord::Relation::QueryAttribute.new(name.to_s, value, model.type_for_attribute(name.to_s))
+      "$#{binds.size}"
+    end
 
     # Releases concurrency claims after the job's execution has been committed,
     # promoting waiting jobs. Failures are reported but do not affect the finished job;

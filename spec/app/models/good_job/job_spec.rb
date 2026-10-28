@@ -646,6 +646,71 @@ RSpec.describe GoodJob::Job do
 
         expect(described_class).to have_received(:perform_with_advisory_lock).twice
       end
+
+      %i[advisory skiplocked hybrid].each do |lock_strategy|
+        context "when lock_strategy is #{lock_strategy}" do
+          it 'writes the job and its execution with one statement before and one after performing, without explicit transactions' do
+            statements = []
+            callback = ->(event) { statements << event.payload[:sql] unless event.payload[:name] == 'SCHEMA' }
+            ActiveSupport::Notifications.subscribed(callback, 'sql.active_record') do
+              described_class.perform_with_lock(lock_id: process_id, lock_strategy: lock_strategy)
+            end
+
+            expect(statements).not_to include(match(/\A(BEGIN|COMMIT)\b/))
+            expect(statements.grep(/\b(INSERT INTO|UPDATE) "good_job(s|_executions)"/).size).to eq 2
+          end
+
+          it 'persists the same job and execution attributes it holds in memory' do
+            instrumented_execution = nil
+            callback = ->(event) { instrumented_execution = event.payload[:execution] }
+            ActiveSupport::Notifications.subscribed(callback, 'perform_job.good_job') do
+              described_class.perform_with_lock(lock_id: process_id, lock_strategy: lock_strategy)
+            end
+
+            expect(good_job.reload).to have_attributes(
+              performed_at: be_present,
+              finished_at: be_present,
+              executions_count: 1,
+              locked_by_id: nil
+            )
+            expect(instrumented_execution).to be_persisted
+            expect(instrumented_execution).not_to be_changed
+            expect(instrumented_execution.job).to eq good_job
+            execution = good_job.executions.sole
+            expect(execution).to have_attributes(
+              job_class: 'TestJob',
+              queue_name: good_job.queue_name,
+              serialized_params: good_job.serialized_params,
+              scheduled_at: good_job.scheduled_at,
+              created_at: good_job.performed_at,
+              process_id: process_id,
+              finished_at: good_job.finished_at,
+              duration: be_present,
+              error: nil,
+              error_event: nil
+            )
+            expect(instrumented_execution.attributes.except('duration')).to eq execution.attributes.except('duration')
+          end
+
+          it 'marks an interrupted execution as interrupted, but not the new execution' do
+            interrupted_at = 1.minute.ago.change(usec: 0)
+            good_job.update!(performed_at: interrupted_at, executions_count: 1)
+            interrupted_execution = good_job.executions.create!(created_at: interrupted_at, scheduled_at: interrupted_at, job_class: 'TestJob')
+
+            execution_interrupted = nil
+            callback = ->(_event) { execution_interrupted = GoodJob::CurrentThread.execution_interrupted }
+            ActiveSupport::Notifications.subscribed(callback, 'perform_job.good_job') do
+              described_class.perform_with_lock(lock_id: process_id, lock_strategy: lock_strategy)
+            end
+
+            expect(execution_interrupted).to eq interrupted_at
+            expect(interrupted_execution.reload).to have_attributes(error_event: 'interrupted', finished_at: be_present)
+            new_execution = good_job.executions.where.not(id: interrupted_execution.id).sole
+            expect(new_execution).to have_attributes(error: nil, error_event: nil, finished_at: be_present)
+            expect(good_job.reload).to have_attributes(executions_count: 2, error: nil, finished_at: be_present)
+          end
+        end
+      end
     end
 
     describe '.perform_with_skip_locked' do
