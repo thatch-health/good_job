@@ -103,6 +103,13 @@ module GoodJob
     module LockTypeAccessor
       requires_ancestor { ActiveRecord::Base }
     end
+
+    # attr_accessor in GoodJob::Job::Lockable's included block (a concern)
+    sig { returns(T.untyped) }
+    def started_execution; end
+
+    sig { params(value: T.untyped).returns(T.untyped) }
+    def started_execution=(value); end
   end
 end
 
@@ -137,11 +144,11 @@ module GoodJob
       sig { params(select_limit: T.nilable(Integer), block: T.untyped).returns(T.untyped) }
       def with_advisory_lock_claim(select_limit: nil, &block); end
 
-      sig { params(locked_by_id: T.untyped, locked_at: T.untyped, lock_type: T.untyped, block: T.untyped).returns(T.untyped) }
-      def with_skip_locked_claim(locked_by_id:, locked_at:, lock_type:, &block); end
+      sig { params(locked_by_id: T.untyped, locked_at: T.untyped, lock_type: T.untyped, start_execution: T::Boolean, block: T.untyped).returns(T.untyped) }
+      def with_skip_locked_claim(locked_by_id:, locked_at:, lock_type:, start_execution: false, &block); end
 
-      sig { params(locked_by_id: T.untyped, locked_at: T.untyped, lock_type: T.untyped, block: T.untyped).returns(T.untyped) }
-      def with_hybrid_lock_claim(locked_by_id:, locked_at:, lock_type:, &block); end
+      sig { params(locked_by_id: T.untyped, locked_at: T.untyped, lock_type: T.untyped, start_execution: T::Boolean, block: T.untyped).returns(T.untyped) }
+      def with_hybrid_lock_claim(locked_by_id:, locked_at:, lock_type:, start_execution: false, &block); end
     end
   end
 
